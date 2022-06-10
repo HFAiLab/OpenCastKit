@@ -15,7 +15,7 @@
 
 ## Requirements
 
-- hfai
+- [hfai](https://doc.hfai.high-flyer.cn/index.html)
 - torch >=1.8
 
 
