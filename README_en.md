@@ -2,7 +2,7 @@
 
 English | [简体中文](README.md)
 
-This is a global data-driven high-resolution weather model implemented and improved by High-Flyer AI. It is the first AI weather model, which can compare with the ECMWF Integrated
+This is a global data-driven high-resolution weather model implemented and improved by [High-Flyer AI](https://www.high-flyer.cn/). It is the first AI weather model, which can compare with the ECMWF Integrated
 Forecasting System (IFS).
 
 Typhoon track comparison:
@@ -15,7 +15,7 @@ Water vapour comparison:
 
 ## Requirements
 
-- hfai
+- [hfai](https://doc.hfai.high-flyer.cn/index.html)
 - torch >=1.8
 
 
