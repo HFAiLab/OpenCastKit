@@ -1,4 +1,3 @@
-import math
 from functools import partial
 from collections import OrderedDict
 import torch
@@ -18,7 +17,8 @@ class Mlp(nn.Module):
         hidden_features = hidden_features or in_features
         self.fc1 = nn.Linear(in_features, hidden_features)
         self.act = act_layer()
-        self.fc2 = nn.Linear(hidden_features, out_features)
+        # self.fc2 = nn.Linear(hidden_features, out_features)
+        self.fc2 = nn.AdaptiveAvgPool1d(out_features)
         self.drop = nn.Dropout(drop)
 
     def forward(self, x):
@@ -67,16 +67,16 @@ class AdaptiveFourierNeuralOperator(nn.Module):
         else:
             bias = torch.zeros(x.shape, device=x.device)
 
-        x = x.reshape(B, self.h, self.w, C).float()
+        x = x.reshape(B, self.h, self.w, C)
         x = torch.fft.rfft2(x, dim=(1, 2), norm='ortho')
         x = x.reshape(B, x.shape[1], x.shape[2], self.num_blocks, self.block_size)
 
-        x_real_1 = F.relu(self.multiply(x.real, self.w1[0]) - self.multiply(x.imag, self.w1[1]) + self.b1[0])
-        x_imag_1 = F.relu(self.multiply(x.real, self.w1[1]) + self.multiply(x.imag, self.w1[0]) + self.b1[1])
-        x_real_2 = self.multiply(x_real_1, self.w2[0]) - self.multiply(x_imag_1, self.w2[1]) + self.b2[0]
-        x_imag_2 = self.multiply(x_real_1, self.w2[1]) + self.multiply(x_imag_1, self.w2[0]) + self.b2[1]
+        x_real = F.relu(self.multiply(x.real, self.w1[0]) - self.multiply(x.imag, self.w1[1]) + self.b1[0], inplace=True)
+        x_imag = F.relu(self.multiply(x.real, self.w1[1]) + self.multiply(x.imag, self.w1[0]) + self.b1[1], inplace=True)
+        x_real = self.multiply(x_real, self.w2[0]) - self.multiply(x_imag, self.w2[1]) + self.b2[0]
+        x_imag = self.multiply(x_real, self.w2[1]) + self.multiply(x_imag, self.w2[0]) + self.b2[1]
 
-        x = torch.stack([x_real_2, x_imag_2], dim=-1).float()
+        x = torch.stack([x_real, x_imag], dim=-1)
         x = F.softshrink(x, lambd=self.softshrink) if self.softshrink else x
 
         x = torch.view_as_complex(x)
@@ -88,15 +88,11 @@ class AdaptiveFourierNeuralOperator(nn.Module):
 
 
 class Block(nn.Module):
-    def __init__(self, dim, mlp_ratio=4., drop=0., drop_path=0., act_layer=nn.GELU, norm_layer=nn.LayerNorm, h=14, w=8, use_fno=False, use_blocks=False):
+    def __init__(self, dim, mlp_ratio=4., drop=0., drop_path=0., act_layer=nn.GELU, norm_layer=nn.LayerNorm, h=14, w=8):
         super().__init__()
         args = get_args()
         self.norm1 = norm_layer(dim)
-
-        if "fno" == args.mixing_type:
-            self.filter = AdaptiveFourierNeuralOperator(dim, h=h, w=w)
-        else:
-            raise NotImplementedError
+        self.filter = AdaptiveFourierNeuralOperator(dim, h=h, w=w)
 
         self.drop_path = DropPath(drop_path) if drop_path > 0. else nn.Identity()
         self.norm2 = norm_layer(dim)
@@ -111,13 +107,13 @@ class Block(nn.Module):
         x = self.filter(x)
 
         if self.double_skip:
-            x = x + residual
+            x += residual
             residual = x
 
         x = self.norm2(x)
         x = self.mlp(x)
         x = self.drop_path(x)
-        x = x + residual
+        x += residual
         return x
 
 
@@ -147,7 +143,7 @@ class PatchEmbed(nn.Module):
 
 class AFNONet(nn.Module):
     def __init__(self, img_size=None, patch_size=8, in_chans=20, out_chans=20, embed_dim=768, depth=12, mlp_ratio=4.,
-                 uniform_drop=False, drop_rate=0., drop_path_rate=0., norm_layer=None, dropcls=0, use_fno=False, use_blocks=False):
+                 uniform_drop=False, drop_rate=0., drop_path_rate=0., norm_layer=None, dropcls=0):
         super().__init__()
 
         if img_size is None:
@@ -170,7 +166,7 @@ class AFNONet(nn.Module):
         else:
             dpr = [x.item() for x in torch.linspace(0, drop_path_rate, depth)]  # stochastic depth decay rule
         
-        self.blocks = nn.ModuleList([Block(dim=embed_dim, mlp_ratio=mlp_ratio, drop=drop_rate, drop_path=dpr[i], norm_layer=norm_layer, h=self.h, w=self.w, use_fno=use_fno, use_blocks=use_blocks) for i in range(depth)])
+        self.blocks = nn.ModuleList([Block(dim=embed_dim, mlp_ratio=mlp_ratio, drop=drop_rate, drop_path=dpr[i], norm_layer=norm_layer, h=self.h, w=self.w) for i in range(depth)])
         self.norm = norm_layer(embed_dim)
 
         # Representation layer
@@ -216,7 +212,7 @@ class AFNONet(nn.Module):
     def forward_features(self, x):
         B = x.shape[0]
         x = self.patch_embed(x)
-        x = x + self.pos_embed
+        x += self.pos_embed
         x = self.pos_drop(x)
 
         if not get_args().checkpoint_activations:
@@ -235,36 +231,3 @@ class AFNONet(nn.Module):
         x = self.pre_logits(x)
         x = self.head(x)
         return x
-
-
-def resize_pos_embed(posemb, posemb_new):
-    # Rescale the grid of position embeddings when loading from state_dict. Adapted from
-    # https://github.com/google-research/vision_transformer/blob/00883dd691c63a6830751563748663526e811cee/vit_jax/checkpoint.py#L224
-    ntok_new = posemb_new.shape[1]
-    posemb_tok, posemb_grid = posemb[:, :1], posemb[0, 1:]
-    ntok_new -= 1
-    gs_old = int(math.sqrt(len(posemb_grid)))
-    gs_new = int(math.sqrt(ntok_new))
-    posemb_grid = posemb_grid.reshape(1, gs_old, gs_old, -1).permute(0, 3, 1, 2)
-    posemb_grid = F.interpolate(posemb_grid, size=(gs_new, gs_new), mode='bilinear')
-    posemb_grid = posemb_grid.permute(0, 2, 3, 1).reshape(1, gs_new * gs_new, -1)
-    posemb = torch.cat([posemb_tok, posemb_grid], dim=1)
-    return posemb
-
-
-def checkpoint_filter_fn(state_dict, model):
-    """ convert patch embedding weight from manual patchify + linear proj to conv"""
-    out_dict = {}
-    if 'model' in state_dict:
-        # For deit models
-        state_dict = state_dict['model']
-    for k, v in state_dict.items():
-        if 'patch_embed.proj.weight' in k and len(v.shape) < 4:
-            # For old models that I trained prior to conv based patchification
-            O, I, H, W = model.patch_embed.proj.weight.shape
-            v = v.reshape(O, -1, H, W)
-        elif k == 'pos_embed' and v.shape != model.pos_embed.shape:
-            # To resize pos embedding when using model at different size from pretrained weights
-            v = resize_pos_embed(v, model.pos_embed)
-        out_dict[k] = v
-    return out_dict

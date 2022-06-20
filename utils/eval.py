@@ -9,12 +9,13 @@ def single_step_evaluate(data_loader, model, criterion):
     # switch to evaluation mode
     model.eval()
     for step, batch in enumerate(data_loader):
-        x, y = [x.float().cuda(non_blocking=True) for x in batch[:2]]
-        x = x.transpose(3, 2).transpose(2, 1)
-        y = y.transpose(3, 2).transpose(2, 1)
+        xt, xt1 = [x.half().cuda(non_blocking=True) for x in batch]
+        x = xt.transpose(3, 2).transpose(2, 1)
+        y = xt1.transpose(3, 2).transpose(2, 1)
 
-        out = model(x)
-        loss += criterion(out, y)
+        with torch.cuda.amp.autocast():
+            out = model(x)
+            loss += criterion(out, y)
 
         total += 1
 
@@ -34,17 +35,16 @@ def multi_step_evaluate(data_loader, model, criterion):
     # switch to evaluation mode
     model.eval()
     for step, batch in enumerate(data_loader):
-        x, y_0, y_1 = [x.float().cuda(non_blocking=True) for x in batch[:3]]
-        x = x.transpose(3, 2).transpose(2, 1)
-        y_0 = y_0.transpose(3, 2).transpose(2, 1)
-        y_1 = y_1.transpose(3, 2).transpose(2, 1)
+        xt, xt1, xt2 = [x.half().cuda(non_blocking=True) for x in batch]
+        xt = xt.transpose(3, 2).transpose(2, 1)
+        xt1 = xt1.transpose(3, 2).transpose(2, 1)
+        xt2 = xt2.transpose(3, 2).transpose(2, 1)
 
-        out_0 = model(x)
-        loss_0 = criterion(out_0, y_0)
-        out_1 = model(out_0)
-        loss_1 = criterion(out_1, y_1)
-
-        loss += torch.add(loss_0, loss_1)
+        with torch.cuda.amp.autocast():
+            out = model(xt)
+            loss = criterion(out, xt1)
+            out = model(out)
+            loss += criterion(out, xt2)
 
         total += 1
 
@@ -66,13 +66,14 @@ def precip_step_evaluate(data_loader, backbone_model, precip_model, criterion):
     precip_model.eval()
 
     for step, batch in enumerate(data_loader):
-        x, _, _, y = [x.cuda(non_blocking=True) for x in batch[[0, 3]]]
-        x = x.transpose(3, 2).transpose(2, 1)
-        y = torch.unsqueeze(y, 1)
+        xt, pt1 = [x.half().cuda(non_blocking=True) for x in batch]
+        x = xt.transpose(3, 2).transpose(2, 1)
+        y = torch.unsqueeze(pt1, 1)
 
-        out = backbone_model(x)
-        out = precip_model(out)
-        loss += criterion(out, y)
+        with torch.cuda.amp.autocast():
+            out = backbone_model(x)
+            out = precip_model(out)
+            loss += criterion(out, y)
 
         total += 1
 

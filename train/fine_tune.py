@@ -1,14 +1,13 @@
 import hfai_env
 hfai_env.set_env("weather")
 
-import os
+import os, sys
 import time
 from pathlib import Path
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.backends.cudnn as cudnn
-from torch.nn.parallel import DistributedDataParallel
 from torch.utils.data.distributed import DistributedSampler
 from functools import partial
 
@@ -18,6 +17,7 @@ from timm.scheduler import create_scheduler
 import hfai
 hfai.set_watchdog_time(21600)
 import hfai.nccl.distributed as dist
+from hfai.nn.parallel import DistributedDataParallel
 from ffrecord.torch import DataLoader
 import hfai.nn as hfnn
 from hfai.datasets import ERA5
@@ -33,28 +33,30 @@ SAVE_PATH.mkdir(parents=True, exist_ok=True)
 
 def train_one_epoch(epoch, start_step, model, criterion, data_loader, optimizer, loss_scaler, lr_scheduler, min_loss):
     model.train()
+    accumulation_steps = 16
 
     for step, batch in enumerate(data_loader):
         if step < start_step:
             continue
 
-        x, y_0, y_1 = [x.cuda(non_blocking=True) for x in batch[:3]]
-        x = x.transpose(3, 2).transpose(2, 1)
-        y_0 = y_0.transpose(3, 2).transpose(2, 1)
-        y_1 = y_1.transpose(3, 2).transpose(2, 1)
+        xt, xt1, xt2 = [x.half().cuda(non_blocking=True) for x in batch]
+        xt = xt.transpose(3, 2).transpose(2, 1)
+        xt1 = xt1.transpose(3, 2).transpose(2, 1)
+        xt2 = xt2.transpose(3, 2).transpose(2, 1)
 
-        out = model(x)
-        loss = criterion(out, y_0)
-        out = model(out)
-        loss += criterion(out, y_1)
-
-        optimizer.zero_grad()
+        with torch.cuda.amp.autocast():
+            out = model(xt)
+            loss = criterion(out, xt1)
+            out = model(out)
+            loss += criterion(out, xt2)
+            loss /= accumulation_steps
         loss_scaler.scale(loss).backward()
-        loss_scaler.step(optimizer)
-        loss_scaler.update()
 
-        torch.cuda.synchronize()
-        torch.cuda.empty_cache()
+        # 梯度累积
+        if (step+1) % accumulation_steps == 0:
+            loss_scaler.step(optimizer)
+            loss_scaler.update()
+            optimizer.zero_grad()
 
         if dist.get_rank() == 0 and hfai.receive_suspend_command():
             save_model(model, epoch, step + 1, optimizer, lr_scheduler, loss_scaler, min_loss, SAVE_PATH / 'finetune_latest.pt')
@@ -65,8 +67,8 @@ def train_one_epoch(epoch, start_step, model, criterion, data_loader, optimizer,
 def main(local_rank):
     args = get_args()
     args.epochs = 50
-    args.batch_size = 1
-    args.lr = 5e-4
+    args.batch_size = 2
+    args.lr = 1e-4
     # input size
     h, w = 720, 1440
     x_c, y_c = 20, 20
@@ -86,11 +88,11 @@ def main(local_rank):
     dist.init_process_group(backend="nccl", init_method=f"tcp://{ip}:{port}", world_size=hosts * gpus, rank=rank * gpus + local_rank)
     torch.cuda.set_device(local_rank)
 
-    train_dataset = ERA5(split="train", check_data=True)
+    train_dataset = ERA5(split="train", mode='finetune', check_data=True)
     train_datasampler = DistributedSampler(train_dataset, shuffle=True)
     train_dataloader = DataLoader(train_dataset, args.batch_size, sampler=train_datasampler, num_workers=8, pin_memory=True, drop_last=True)
 
-    val_dataset = ERA5(split="val", check_data=True)
+    val_dataset = ERA5(split="val", mode='finetune', check_data=True)
     val_datasampler = DistributedSampler(val_dataset, shuffle=False)
     val_dataloader = DataLoader(val_dataset, args.batch_size, sampler=val_datasampler, num_workers=8, pin_memory=True, drop_last=False)
 
@@ -99,11 +101,10 @@ def main(local_rank):
 
     if local_rank == 0:
         param_sum, buffer_sum, all_size = getModelSize(model)
-        print( f"Rank: {rank}, Local_rank: {local_rank} | Number of Parameters: {param_sum}\nNumber of Buffers: {buffer_sum}\nSize of Model: {all_size:.4f} MB\n")
+        print( f"Rank: {rank}, Local_rank: {local_rank} | Number of Parameters: {param_sum}, Number of Buffers: {buffer_sum}, Size of Model: {all_size:.4f} MB\n")
 
     model = DistributedDataParallel(model.cuda(), device_ids=[local_rank])
 
-    args.lr = args.lr * args.batch_size * dist.get_world_size() / 512.0
     param_groups = timm.optim.optim_factory.add_weight_decay(model, args.weight_decay)
     optimizer = torch.optim.AdamW(param_groups, lr=args.lr, betas=(0.9, 0.95))
     loss_scaler = torch.cuda.amp.GradScaler(enabled=True)

@@ -1,14 +1,13 @@
 import hfai_env
 hfai_env.set_env("weather")
 
-import os
+import os, sys
 import time
 from pathlib import Path
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.backends.cudnn as cudnn
-from torch.nn.parallel import DistributedDataParallel
 from torch.utils.data.distributed import DistributedSampler
 from functools import partial
 
@@ -18,6 +17,7 @@ from timm.scheduler import create_scheduler
 import hfai
 hfai.set_watchdog_time(21600)
 import hfai.nccl.distributed as dist
+from hfai.nn.parallel import DistributedDataParallel
 from ffrecord.torch import DataLoader
 import hfai.nn as hfnn
 from hfai.datasets import ERA5
@@ -35,22 +35,28 @@ def train_one_epoch(epoch, start_step, backbone_model, precip_model, criterion, 
     backbone_model.eval()
     precip_model.train()
 
+    accumulation_steps = 8
+
     for step, batch in enumerate(data_loader):
         if step < start_step:
             continue
 
-        x, _, _, y = [x.cuda(non_blocking=True) for x in batch[[0, 3]]]
-        x = x.transpose(3, 2).transpose(2, 1)
-        y = torch.unsqueeze(y, 1)
+        xt, pt1 = [x.half().cuda(non_blocking=True) for x in batch]
+        x = xt.transpose(3, 2).transpose(2, 1)
+        y = torch.unsqueeze(pt1, 1)
 
-        out = backbone_model(x)
-        out = precip_model(out)
-        loss = criterion(out, y)
-
-        optimizer.zero_grad()
+        with torch.cuda.amp.autocast():
+            out = backbone_model(x)
+            out = precip_model(out)
+            loss = criterion(out, y)
+            loss /= accumulation_steps
         loss_scaler.scale(loss).backward()
-        loss_scaler.step(optimizer)
-        loss_scaler.update()
+
+        # 梯度累积
+        if (step + 1) % accumulation_steps == 0:
+            loss_scaler.step(optimizer)
+            loss_scaler.update()
+            optimizer.zero_grad()
 
         torch.cuda.synchronize()
         torch.cuda.empty_cache()
@@ -85,11 +91,11 @@ def main(local_rank):
     dist.init_process_group(backend="nccl", init_method=f"tcp://{ip}:{port}", world_size=hosts * gpus, rank=rank * gpus + local_rank)
     torch.cuda.set_device(local_rank)
 
-    train_dataset = ERA5(split="train", check_data=True)
+    train_dataset = ERA5(split="train", mode='precipitation', check_data=True)
     train_datasampler = DistributedSampler(train_dataset, shuffle=True)
     train_dataloader = DataLoader(train_dataset, args.batch_size, sampler=train_datasampler, num_workers=8, pin_memory=True, drop_last=True)
 
-    val_dataset = ERA5(split="val", check_data=True)
+    val_dataset = ERA5(split="val", mode='precipitation', check_data=True)
     val_datasampler = DistributedSampler(val_dataset, shuffle=False)
     val_dataloader = DataLoader(val_dataset, args.batch_size, sampler=val_datasampler, num_workers=8, pin_memory=True, drop_last=False)
 
@@ -100,9 +106,9 @@ def main(local_rank):
 
     if local_rank == 0:
         param_sum, buffer_sum, all_size = getModelSize(backbone_model)
-        print( f"Rank: {rank}, Local_rank: {local_rank}\nBackbone | Number of Parameters: {param_sum}\nNumber of Buffers: {buffer_sum}\nSize of Model: {all_size:.4f} MB")
+        print( f"Rank: {rank}, Local_rank: {local_rank}\nBackbone | Number of Parameters: {param_sum}, Number of Buffers: {buffer_sum}, Size of Model: {all_size:.4f} MB")
         param_sum, buffer_sum, all_size = getModelSize(precip_model)
-        print(f"Precipitation | Number of Parameters: {param_sum}\nNumber of Buffers: {buffer_sum}\nSize of Model: {all_size:.4f} MB\n")
+        print(f"Precipitation | Number of Parameters: {param_sum}, Number of Buffers: {buffer_sum}, Size of Model: {all_size:.4f} MB\n")
 
     backbone_model = DistributedDataParallel(backbone_model.cuda(), device_ids=[local_rank])
     precip_model = DistributedDataParallel(precip_model.cuda(), device_ids=[local_rank])

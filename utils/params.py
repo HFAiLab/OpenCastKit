@@ -68,8 +68,6 @@ def get_args_parser():
     parser.add_argument('--ls-w', type=int, default=4)
     parser.add_argument('--ls-dp-rank', type=int, default=16)
 
-    parser.add_argument('--mixing-type', type=str, default="fno")
-
     return parser
 
 
