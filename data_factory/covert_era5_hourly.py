@@ -60,7 +60,7 @@ def write_dataset(x, xt1, xt2, pt1, out_file):
 def load_ndf(time_scale):
     datas = []
     for file in DATANAMES:
-        tmp = xr.open_mfdataset((f'{DATADIR}/{file}/*.nc'), combine='by_coords').sel(time=time_scale)
+        tmp = xr.open_mfdataset(f'{DATADIR}/{file}/*.nc', combine='by_coords').sel(time=time_scale)
         if '@' in file:
             k, v = file.split('@')
             tmp = tmp.rename_vars({DATAMAP[k]: f'{DATAMAP[k]}@{v}'})
@@ -108,8 +108,8 @@ def fetch_dataset(step, out_dir, time_scale):
 def dump_era5(out_dir):
     out_dir.mkdir(exist_ok=True, parents=True)
 
-    start_time = datetime.date(1979, 1, 1)
-    end_time = datetime.date(2022, 1, 1)
+    start_time = datetime.date(2022, 8, 1)
+    end_time = datetime.date(2022, 9, 1)
 
     cursor_time = start_time
     while True:

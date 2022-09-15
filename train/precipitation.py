@@ -1,12 +1,8 @@
-import hfai_env
-hfai_env.set_env("weather")
-
-import os, sys
+import os
 import time
 from pathlib import Path
 import numpy as np
 import torch
-import torch.nn as nn
 import torch.backends.cudnn as cudnn
 from torch.utils.data.distributed import DistributedSampler
 from functools import partial
@@ -18,8 +14,8 @@ import hfai
 hfai.set_watchdog_time(21600)
 import hfai.nccl.distributed as dist
 from hfai.nn.parallel import DistributedDataParallel
+# from torch.nn.parallel import DistributedDataParallel
 from ffrecord.torch import DataLoader
-import hfai.nn as hfnn
 from hfai.datasets import ERA5
 
 from model.afnonet import AFNONet
@@ -35,8 +31,6 @@ def train_one_epoch(epoch, start_step, backbone_model, precip_model, criterion, 
     backbone_model.eval()
     precip_model.train()
 
-    accumulation_steps = 8
-
     for step, batch in enumerate(data_loader):
         if step < start_step:
             continue
@@ -46,17 +40,16 @@ def train_one_epoch(epoch, start_step, backbone_model, precip_model, criterion, 
         y = torch.unsqueeze(pt1, 1)
 
         with torch.cuda.amp.autocast():
-            out = backbone_model(x)
-            out = precip_model(out)
-            loss = criterion(out, y)
-            loss /= accumulation_steps
+            with torch.no_grad():
+                out = backbone_model(x)
+            with torch.enable_grad():
+                out = precip_model(out)
+                loss = criterion(out, y)
         loss_scaler.scale(loss).backward()
 
-        # 梯度累积
-        if (step + 1) % accumulation_steps == 0:
-            loss_scaler.step(optimizer)
-            loss_scaler.update()
-            optimizer.zero_grad()
+        loss_scaler.step(optimizer)
+        loss_scaler.update()
+        optimizer.zero_grad()
 
         torch.cuda.synchronize()
         torch.cuda.empty_cache()
@@ -67,29 +60,14 @@ def train_one_epoch(epoch, start_step, backbone_model, precip_model, criterion, 
             hfai.go_suspend()
 
 
-def main(local_rank):
+def train(local_rank, rank, epoch, batch_size, lr):
     args = get_args()
-    args.epochs = 25
-    args.batch_size = 3
-    args.lr = 2.5e-4
+    args.epochs = epoch
+    args.batch_size = batch_size
+    args.lr = lr
     # input size
     h, w = 720, 1440
     x_c, y_c, p_c = 20, 20, 1
-
-    # fix the seed for reproducibility
-    torch.manual_seed(args.seed)
-    np.random.seed(args.seed)
-    cudnn.benchmark = True
-
-    # init dist
-    ip = os.environ.get("MASTER_ADDR", "127.0.0.1")
-    port = os.environ.get("MASTER_PORT", "54247")
-    hosts = int(os.environ.get("WORLD_SIZE", "1"))  # number of nodes
-    rank = int(os.environ.get("RANK", "0"))  # node id
-    gpus = torch.cuda.device_count()  # gpus per node
-
-    dist.init_process_group(backend="nccl", init_method=f"tcp://{ip}:{port}", world_size=hosts * gpus, rank=rank * gpus + local_rank)
-    torch.cuda.set_device(local_rank)
 
     train_dataset = ERA5(split="train", mode='precipitation', check_data=True)
     train_datasampler = DistributedSampler(train_dataset, shuffle=True)
@@ -99,12 +77,13 @@ def main(local_rank):
     val_datasampler = DistributedSampler(val_dataset, shuffle=False)
     val_dataloader = DataLoader(val_dataset, args.batch_size, sampler=val_datasampler, num_workers=8, pin_memory=True, drop_last=False)
 
-    backbone_model = AFNONet(img_size=[h, w], in_chans=x_c, out_chans=y_c, norm_layer=partial(nn.LayerNorm, eps=1e-6))
-    backbone_model = hfnn.to_hfai(backbone_model)
-    precip_model = AFNONet(img_size=[h, w], in_chans=x_c, out_chans=p_c, norm_layer=partial(nn.LayerNorm, eps=1e-6))
-    precip_model = hfnn.to_hfai(precip_model)
+    backbone_model = AFNONet(img_size=[h, w], in_chans=x_c, out_chans=y_c, norm_layer=partial(torch.nn.LayerNorm, eps=1e-6))
+    backbone_model = hfai.nn.to_hfai(backbone_model)
+    precip_model = AFNONet(img_size=[h, w], in_chans=x_c, out_chans=p_c, norm_layer=partial(torch.nn.LayerNorm, eps=1e-6))
+    precip_model = hfai.nn.to_hfai(precip_model)
 
     if local_rank == 0:
+        print('Precipitation')
         param_sum, buffer_sum, all_size = getModelSize(backbone_model)
         print( f"Rank: {rank}, Local_rank: {local_rank}\nBackbone | Number of Parameters: {param_sum}, Number of Buffers: {buffer_sum}, Size of Model: {all_size:.4f} MB")
         param_sum, buffer_sum, all_size = getModelSize(precip_model)
@@ -113,12 +92,11 @@ def main(local_rank):
     backbone_model = DistributedDataParallel(backbone_model.cuda(), device_ids=[local_rank])
     precip_model = DistributedDataParallel(precip_model.cuda(), device_ids=[local_rank])
 
-    args.lr = args.lr * args.batch_size * dist.get_world_size() / 512.0
     param_groups = timm.optim.optim_factory.add_weight_decay(precip_model, args.weight_decay)
     optimizer = torch.optim.AdamW(param_groups, lr=args.lr, betas=(0.9, 0.95))
     loss_scaler = torch.cuda.amp.GradScaler(enabled=True)
     lr_scheduler, _ = create_scheduler(args, optimizer)
-    criterion = nn.MSELoss()
+    criterion = torch.nn.MSELoss()
 
     # load
     load_model(backbone_model.module, path=SAVE_PATH / 'backbone.pt', only_model=True)
@@ -142,8 +120,29 @@ def main(local_rank):
                 save_model(precip_model, path=SAVE_PATH / 'precipitation.pt', only_model=True)
             save_model(precip_model, epoch + 1, 0, optimizer, lr_scheduler, loss_scaler, min_loss, SAVE_PATH / 'precipitation_latest.pt')
 
+    if local_rank == 0:
+        print("------------------------------------")
+
+
+def main(local_rank):
+    # fix the seed for reproducibility
+    torch.manual_seed(42)
+    np.random.seed(42)
+    cudnn.benchmark = True
+
+    # init dist
+    ip = os.environ.get("MASTER_ADDR", "127.0.0.1")
+    port = os.environ.get("MASTER_PORT", "54247")
+    hosts = int(os.environ.get("WORLD_SIZE", "1"))  # number of nodes
+    rank = int(os.environ.get("RANK", "0"))  # node id
+    gpus = torch.cuda.device_count()  # gpus per node
+
+    dist.init_process_group(backend="nccl", init_method=f"tcp://{ip}:{port}", world_size=hosts * gpus, rank=rank * gpus + local_rank)
+    torch.cuda.set_device(local_rank)
+
+    train(local_rank, rank, epoch=50, batch_size=2, lr=2.5e-4)
 
 if __name__ == '__main__':
     ngpus = torch.cuda.device_count()
-    torch.multiprocessing.spawn(main, args=(), nprocs=ngpus)
+    hfai.multiprocessing.spawn(main, args=(), nprocs=ngpus, bind_numa=True)
 
