@@ -5,6 +5,8 @@ English | [简体中文](README.md)
 This is a global data-driven high-resolution weather model implemented and improved by [High-Flyer AI](https://www.high-flyer.cn/). It is the first AI weather model, which can compare with the ECMWF Integrated
 Forecasting System (IFS).
 
+The model weights trained on the ERA5 data from 1979-01 to 2022-12 are released at [Hugging Face repository](https://huggingface.co/hf-ai/FourCastNet). You can also have a look at [HF-Earth](https://www.high-flyer.cn/hf-earth/), a daily updated demo of weather prediction.
+
 Typhoon track comparison:
 
 ![](./img/wind_small.gif)
@@ -12,6 +14,7 @@ Typhoon track comparison:
 Water vapour comparison:
 
 ![](./img/precipitation_small.gif)
+
 
 ## Requirements
 

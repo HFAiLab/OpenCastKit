@@ -4,6 +4,8 @@
 
 本项目在幻方萤火超算集群上用 PyTorch 实现并优化了 FourCastNet 全球AI气象预报模型，首次使得AI气象模型能够与欧洲中期天气预报中心（ECMWF）的传统物理模型，高分辨率综合预测系统（IFS），进行直接比较。
 
+我们将基于1979年1月到2022年12月的ERA5数据训练出来的模型参数开源到 [Hugging Face 仓库](https://huggingface.co/hf-ai/FourCastNet)中，并上线了一个每日更新的 [HF-Earth](https://www.high-flyer.cn/hf-earth/)，展示模型的预测效果。
+
 台风路径预测与真实路径比较
 
 ![](./img/wind_small.gif)
