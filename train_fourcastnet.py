@@ -53,7 +53,7 @@ def pretrain_one_epoch(epoch, start_step, model, criterion, data_loader, optimiz
         optimizer.zero_grad()
 
         if dist.get_rank() == 0 and hfai.client.receive_suspend_command():
-            save_model(model, epoch, step+1, optimizer, lr_scheduler, loss_scaler, min_loss, SAVE_PATH/'pretrain_latest.pt')
+            save_model(model.module, epoch, step+1, optimizer, lr_scheduler, loss_scaler, min_loss, SAVE_PATH/'pretrain_latest.pt')
             hfai.client.go_suspend()
 
     return loss_val.item() / count.item()
@@ -89,7 +89,7 @@ def finetune_one_epoch(epoch, start_step, model, criterion, data_loader, optimiz
         optimizer.zero_grad()
 
         if dist.get_rank() == 0 and hfai.client.receive_suspend_command():
-            save_model(model, epoch, step + 1, optimizer, lr_scheduler, loss_scaler, min_loss, SAVE_PATH / 'finetune_latest.pt')
+            save_model(model.module, epoch, step + 1, optimizer, lr_scheduler, loss_scaler, min_loss, SAVE_PATH / 'finetune_latest.pt')
             hfai.go_suspend()
 
     return loss_val.item() / count.item()
@@ -137,8 +137,8 @@ def train(local_rank, rank, args):
             print(f"Epoch {epoch} | Train loss: {train_loss:.6f}, Val loss: {val_loss:.6f}")
             if val_loss < min_loss:
                 min_loss = val_loss
-                save_model(model, path=SAVE_PATH / 'backbone.pt', only_model=True)
-            save_model(model, epoch + 1, 0, optimizer, lr_scheduler, loss_scaler, min_loss, SAVE_PATH / 'pretrain_latest.pt')
+                save_model(model.module, path=SAVE_PATH / 'backbone.pt', only_model=True)
+            save_model(model.module, epoch + 1, 0, optimizer, lr_scheduler, loss_scaler, min_loss, SAVE_PATH / 'pretrain_latest.pt')
 
 
     # load
@@ -158,8 +158,8 @@ def train(local_rank, rank, args):
             print(f"Epoch {epoch} | Train loss: {train_loss:.6f}, Val loss: {val_loss:.6f}")
             if val_loss < min_loss:
                 min_loss = val_loss
-                save_model(model, path=SAVE_PATH / 'backbone.pt', only_model=True)
-            save_model(model, epoch + 1, 0, optimizer, lr_scheduler, loss_scaler, min_loss, SAVE_PATH / 'finetune_latest.pt')
+                save_model(model.module, path=SAVE_PATH / 'backbone.pt', only_model=True)
+            save_model(model.module, epoch + 1, 0, optimizer, lr_scheduler, loss_scaler, min_loss, SAVE_PATH / 'finetune_latest.pt')
 
 
 def main(local_rank, args):

@@ -44,11 +44,11 @@ def save_model(model, epoch=0, step=0, optimizer=None, lr_scheduler=None, loss_s
 
     if only_model:
         states = {
-            'model': model.module.state_dict(),
+            'model': model.state_dict(),
         }
     else:
         states = {
-            'model': model.module.state_dict(),
+            'model': model.state_dict(),
             'optimizer': optimizer.state_dict(),
             'lr_scheduler': lr_scheduler.state_dict(),
             'loss_scaler': loss_scaler.state_dict(),
