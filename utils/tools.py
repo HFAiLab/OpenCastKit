@@ -32,7 +32,8 @@ def load_model(model, optimizer=None, lr_scheduler=None, loss_scaler=None, path=
             model.load_state_dict(ckpt['model'])
             optimizer.load_state_dict(ckpt['optimizer'])
             lr_scheduler.load_state_dict(ckpt['lr_scheduler'])
-            loss_scaler.load_state_dict(ckpt['loss_scaler'])
+            if ckpt['loss_scaler'] is not None:
+                loss_scaler.load_state_dict(ckpt['loss_scaler'])
             start_epoch = ckpt["epoch"]
             start_step = ckpt["step"]
             min_loss = ckpt["min_loss"]
@@ -51,7 +52,7 @@ def save_model(model, epoch=0, step=0, optimizer=None, lr_scheduler=None, loss_s
             'model': model.state_dict(),
             'optimizer': optimizer.state_dict(),
             'lr_scheduler': lr_scheduler.state_dict(),
-            'loss_scaler': loss_scaler.state_dict(),
+            'loss_scaler': loss_scaler.state_dict() if loss_scaler is not None else None,
             'epoch': epoch,
             'step': step,
             'min_loss': min_loss
