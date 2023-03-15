@@ -1,23 +1,17 @@
-import hfai_env
-hfai_env.set_env("weather")
-
-import hfai
-hfai.set_watchdog_time(86400)
-
 import dask
 import numpy as np
-import datetime
+from datetime import datetime, timedelta
 from dateutil.relativedelta import relativedelta
 import xarray as xr
 import pickle
 from pathlib import Path
 
-
 from ffrecord import FileWriter
+from data_factory.graph_tools import fetch_time_features
 
 np.random.seed(2022)
 
-DATADIR = '/***/era5'
+DATADIR = './output/rawdata/era5_6_hourly/'
 DATANAMES = ['10m_u_component_of_wind', '10m_v_component_of_wind', '2m_temperature',
              'geopotential@1000', 'geopotential@50', 'geopotential@500', 'geopotential@850',
              'mean_sea_level_pressure', 'relative_humidity@500', 'relative_humidity@850',
@@ -37,21 +31,20 @@ DATAMAP = {
 def dataset_to_sample(raw_data, mean, std):
     tmpdata = (raw_data - mean) / std
 
-    dataset_xt = tmpdata[0: -2]
-    dataset_xt1 = tmpdata[1: -1]
-    dataset_xt2 = tmpdata[2:]
+    xt0 = tmpdata[:-2]
+    xt1 = tmpdata[1:-1]
+    yt = tmpdata[2:]
 
-    return dataset_xt, dataset_xt1, dataset_xt2
+    return xt0, xt1, yt
 
 
-def write_dataset(x, xt1, xt2, pt1, out_file):
-
-    n_sample = x.shape[0]
+def write_dataset(x0, x1, y, out_file):
+    n_sample = x0.shape[0]
 
     # 初始化ffrecord
     writer = FileWriter(out_file, n_sample)
 
-    for item in zip(x, xt1, xt2, pt1):
+    for item in zip(x0, x1, y):
         bytes_ = pickle.dumps(item)
         writer.write_one(bytes_)
     writer.close()
@@ -71,60 +64,70 @@ def load_ndf(time_scale):
     return valid_data
 
 
-def fetch_dataset(step, out_dir, time_scale):
+def fetch_dataset(cursor_time, out_dir):
     # load weather data
 
-    with open("/3fs-jd/prod/private/hwj/era5/scaler.pkl", "rb") as f:
+    step = (cursor_time.year - 1979) * 12 + (cursor_time.month - 1) + 1
+    start = cursor_time.strftime('%Y-%m-%d %H:%M:%S')
+    end = (cursor_time + relativedelta(months=1, hours=7)).strftime('%Y-%m-%d %H:%M:%S')
+    print(f'Step {step} | from {start} to {end}')
+
+    time_scale = slice(start, end)
+
+    with open("./output/data/scaler.pkl", "rb") as f:
         pkl = pickle.load(f)
         Mean = pkl["mean"]
         Std = pkl["std"]
 
     valid_data = load_ndf(time_scale)
 
-    Xt, Xt1, Xt2, Pt1 = [], [], [], []
+    # era5 features
+    Xt0, Xt1, Yt = [], [], []
     for i, name in enumerate(['u10', 'v10', 't2m', 'z@1000', 'z@50', 'z@500', 'z@850', 'msl', 'r@500', 'r@850', 'sp', 't@500', 't@850', 'tcwv', 'u@1000', 'u@500', 'u@850', 'v@1000', 'v@500', 'v@850']):
         raw = valid_data[name]
 
         # split sample data
-        xt, xt1, xt2 = dataset_to_sample(raw, Mean[i], Std[i])
-        print(f"{name} | xt.shape: {xt.shape}, xt1.shape: {xt1.shape}, xt2.shape: {xt2.shape}, mean: {Mean[i]}, std: {Std[i]}")
+        xt0, xt1, yt = dataset_to_sample(raw, Mean[i], Std[i])
 
-        Xt.append(xt)
+        Xt0.append(xt0)
         Xt1.append(xt1)
-        Xt2.append(xt2)
+        Yt.append(yt)
 
-    tpdata = np.nan_to_num(valid_data['tp'].values[:, :, :, 0])
-    tpdata = (tpdata - Mean[-1]) / Std[-1]
-    Pt1 = tpdata[1: -1]
-
-    Xt = np.stack(Xt, axis=-1)
+    Xt0 = np.stack(Xt0, axis=-1)
     Xt1 = np.stack(Xt1, axis=-1)
-    Xt2 = np.stack(Xt2, axis=-1)
-    print(f"Xt.shape: {Xt.shape}, Xt1.shape: {Xt1.shape}, Xt2.shape: {Xt2.shape}, Pt1.shape: {Pt1.shape}\n")
+    Yt = np.stack(Yt, axis=-1)
 
-    write_dataset(Xt, Xt1, Xt2, Pt1, out_dir / f"{step:03d}.ffr")
+    # time-dependent features
+    time_features = []
+    for i in range(len(valid_data['time'])):
+        cursor_time = cursor_time + timedelta(hours=6) * i
+        tmp_feats = fetch_time_features(cursor_time)
+        time_features.append(tmp_feats)
+    time_features = np.asarray(time_features)
+
+    Xt0 = np.concatenate([Xt0[:, 1:], time_features[:-2]], axis=-1)
+    Xt1 = np.concatenate([Xt1[:, 1:], time_features[1:-1]], axis=-1)
+    Yt = np.concatenate([Yt[:, 1:], time_features[2:]], axis=-1)
+    print(f"Xt0.shape: {Xt0.shape}, Xt1.shape: {Xt1.shape}, Yt.shape: {Yt.shape}\n")
+
+    write_dataset(Xt0, Xt1, Yt, out_dir / f"{step:03d}.ffr")
 
 
 def dump_era5(out_dir):
     out_dir.mkdir(exist_ok=True, parents=True)
 
-    start_time = datetime.date(2022, 8, 1)
-    end_time = datetime.date(2022, 9, 1)
+    start_time = datetime(1979, 1, 1, 0, 0)
+    end_time = datetime(2023, 2, 1, 0, 0)
 
     cursor_time = start_time
     while True:
         if cursor_time >= end_time:
             break
 
-        step = (cursor_time.year - 1979) * 12 + (cursor_time.month - 1) + 1
-        start = cursor_time.strftime('%Y-%m-%d %H:%M:%S')
-        end = (cursor_time + relativedelta(months=1, hours=7)).strftime('%Y-%m-%d %H:%M:%S')
-
-        print(f'Step {step} | from {start} to {end}')
-        fetch_dataset(step, out_dir, slice(start, end))
-        cursor_time +=  relativedelta(months=1)
+        fetch_dataset(cursor_time, out_dir)
+        cursor_time += relativedelta(months=1)
 
 
 if __name__ == "__main__":
-    out_dir = Path("***/era5/data.ffr")
+    out_dir = Path("./output/data/train.ffr")
     dump_era5(out_dir)
