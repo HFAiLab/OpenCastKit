@@ -18,7 +18,7 @@ torch.backends.cudnn.allow_tf32 = True
 
 from data_factory.datasets import ERA5
 from model.afnonet import AFNONet
-from utils.params import get_args
+from utils.params import get_fourcastnet_args
 from utils.tools import getModelSize, load_model, save_model
 from utils.eval import fourcastnet_pretrain_evaluate, fourcastnet_finetune_evaluate
 
@@ -182,11 +182,7 @@ def main(local_rank, args):
 
 
 if __name__ == '__main__':
-    args = get_args()
-    args.epochs = 200
-    args.batch_size = 2
-    args.lr = 5e-4
-
+    args = get_fourcastnet_args()
     ngpus = torch.cuda.device_count()
     hfai.multiprocessing.spawn(main, args=(args,), nprocs=ngpus, bind_numa=True)
 
