@@ -1,1 +1,1 @@
-from .dataset import ERA5Dataset, WeatherBenchDataset, StandardScaler
+from .datasets import ERA5, StandardScaler
